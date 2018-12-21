@@ -1,6 +1,7 @@
 """Defines a sync module for Blink."""
 
 import logging
+from shutil import copyfileobj
 
 from requests.structures import CaseInsensitiveDict
 from blinkpy import api
@@ -124,6 +125,18 @@ class BlinkSyncModule():
             name = camera_config['name']
             self.cameras[name].update(camera_config, force_cache=force_cache)
 
+    def save_video(self, addr, path):
+        url = "{}{}".format(self.urls.base_url, addr)
+        video = api.http_get(self.blink,
+                             url=url,
+                             stream=True,
+                             json=False)
+        if video is None:
+            _LOGGER.error("Cannot download video %s.", addr)
+            return
+        with open(path, 'wb') as vidfile:
+            copyfileobj(video.raw, vidfile)
+
     def get_videos(self, start_page=0, end_page=1):
         """
         Retrieve last recorded videos per camera.
@@ -148,9 +161,11 @@ class BlinkSyncModule():
                 camera_name = entry['camera_name']
                 clip_addr = entry['address']
                 thumb_addr = entry['thumbnail']
-                clip_date = clip_addr.split('_')[-6:]
-                clip_date = '_'.join(clip_date)
-                clip_date = clip_date.split('.')[0]
+
+                clip_date = entry['created_at']
+                # clip_date = clip_addr.split('_')[-6:]
+                # clip_date = '_'.join(clip_date)
+                # clip_date = clip_date.split('.')[0]
                 try:
                     self.all_clips[camera_name][clip_date] = clip_addr
                 except KeyError:
@@ -158,21 +173,22 @@ class BlinkSyncModule():
 
                 if camera_name not in all_dates:
                     all_dates[camera_name] = list()
-                all_dates[camera_name].append(clip_date)
-                try:
-                    self.videos[camera_name].append(
-                        {
-                            'clip': clip_addr,
-                            'thumb': thumb_addr,
-                        }
-                    )
-                except KeyError:
-                    self.videos[camera_name] = [
-                        {
-                            'clip': clip_addr,
-                            'thumb': thumb_addr,
-                        }
-                    ]
+                if clip_date not in all_dates[camera_name]:
+                    all_dates[camera_name].append(clip_date)
+                    try:
+                        self.videos[camera_name].append(
+                            {
+                                'clip': clip_addr,
+                                'thumb': thumb_addr,
+                            }
+                        )
+                    except KeyError:
+                        self.videos[camera_name] = [
+                            {
+                                'clip': clip_addr,
+                                'thumb': thumb_addr,
+                            }
+                        ]
         self.record_dates = all_dates
         _LOGGER.debug("Retrieved a total of %s records", len(all_dates))
         return self.videos
