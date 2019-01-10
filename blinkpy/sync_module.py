@@ -137,7 +137,7 @@ class BlinkSyncModule():
         with open(path, 'wb') as vidfile:
             copyfileobj(video.raw, vidfile)
 
-    def gev_video_url(self, addr):
+    def get_video_url(self, addr):
         return "{}{}".format(self.urls.base_url, addr)
 
     def get_videos(self, start_page=0, end_page=1):
