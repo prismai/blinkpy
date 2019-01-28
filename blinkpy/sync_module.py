@@ -33,11 +33,10 @@ class BlinkSyncModule():
         self.summary = None
         self.homescreen = None
         self.network_info = None
-        self.record_dates = {}
-        self.videos = {}
         self.events = []
         self.cameras = CaseInsensitiveDict({})
-        self.all_clips = {}
+        self.motion = {}
+        self.last_record = {}
 
     @property
     def attributes(self):
@@ -79,51 +78,67 @@ class BlinkSyncModule():
     def start(self):
         """Initialize the system."""
         response = api.request_syncmodule(self.blink, self.network_id)
-        self.summary = response['syncmodule']
-        self.sync_id = self.summary['id']
-        self.network_id = self.summary['network_id']
-        self.serial = self.summary['serial']
-        self.status = self.summary['status']
+        try:
+            self.summary = response['syncmodule']
+            self.network_id = self.summary['network_id']
+        except (TypeError, KeyError):
+            _LOGGER.error(("Could not retrieve sync module information "
+                           "with response: %s"), response)
+            return False
+
+        try:
+            self.sync_id = self.summary['id']
+            self.serial = self.summary['serial']
+            self.status = self.summary['status']
+        except KeyError:
+            _LOGGER.error("Could not extract some sync module info: %s",
+                          response)
 
         self.events = self.get_events()
-
         self.homescreen = api.request_homescreen(self.blink)
-
         self.network_info = api.request_network_status(self.blink,
                                                        self.network_id)
 
+        self.check_new_videos()
         camera_info = self.get_camera_info()
         for camera_config in camera_info:
             name = camera_config['name']
             self.cameras[name] = BlinkCamera(self)
+            self.motion[name] = False
+            self.cameras[name].update(camera_config, force_cache=True)
 
-        self.videos = self.get_videos()
-        for camera_config in camera_info:
-            name = camera_config['name']
-            if name in self.cameras:
-                self.cameras[name].update(camera_config, force_cache=True)
+        return True
 
     def get_events(self):
         """Retrieve events from server."""
         response = api.request_sync_events(self.blink, self.network_id)
-        return response['event']
+        try:
+            return response['event']
+        except (TypeError, KeyError):
+            _LOGGER.error("Could not extract events: %s", response)
+            return False
 
     def get_camera_info(self):
         """Retrieve camera information."""
         response = api.request_cameras(self.blink, self.network_id)
-        return response['devicestatus']
+        try:
+            return response['devicestatus']
+        except (TypeError, KeyError):
+            _LOGGER.error("Could not extract camera info: %s", response)
+            return []
 
     def refresh(self, force_cache=False):
         """Get all blink cameras and pulls their most recent status."""
         self.events = self.get_events()
-        self.videos = self.get_videos()
         self.homescreen = api.request_homescreen(self.blink)
         self.network_info = api.request_network_status(self.blink,
                                                        self.network_id)
         camera_info = self.get_camera_info()
+        self.check_new_videos()
         for camera_config in camera_info:
             name = camera_config['name']
             self.cameras[name].update(camera_config, force_cache=force_cache)
+
 
     def save_video(self, addr, path):
         url = "{}{}".format(self.urls.base_url, addr)
@@ -202,3 +217,31 @@ class BlinkSyncModule():
         self.record_dates = all_dates
         _LOGGER.debug("Retrieved a total of %s records", len(all_dates))
         return self.videos
+
+
+    def check_new_videos(self):
+        """Check if new videos since last refresh."""
+        resp = api.request_videos(self.blink,
+                                  time=self.blink.last_refresh,
+                                  page=0)
+
+        for camera in self.cameras.keys():
+            self.motion[camera] = False
+
+        try:
+            info = resp['videos']
+        except (KeyError, TypeError):
+            _LOGGER.warning("Could not check for motion. Response: %s", resp)
+            return False
+
+        for entry in info:
+            try:
+                name = entry['camera_name']
+                clip = entry['address']
+                timestamp = entry['created_at']
+                self.motion[name] = True
+                self.last_record[name] = {'clip': clip, 'time': timestamp}
+            except KeyError:
+                _LOGGER.debug("No new videos since last refresh.")
+
+        return True
