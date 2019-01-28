@@ -37,6 +37,7 @@ class BlinkSyncModule():
         self.cameras = CaseInsensitiveDict({})
         self.motion = {}
         self.last_record = {}
+        self.all_clips = {}
 
     @property
     def attributes(self):
@@ -155,69 +156,6 @@ class BlinkSyncModule():
     def get_video_url(self, addr):
         return "{}{}".format(self.urls.base_url, addr)
 
-    def get_videos(self, start_page=0, end_page=1):
-        """
-        Retrieve last recorded videos per camera.
-
-        :param start_page: Page to start reading from on blink servers
-                           (defaults to 0)
-        :param end_page: Page to stop reading from (defaults to 1)
-        """
-        videos = list()
-        all_dates = dict()
-
-        for page_num in range(start_page, end_page + 1):
-            this_page = api.request_videos(self.blink, page=page_num)
-            if not this_page:
-                break
-            elif 'message' in this_page:
-                _LOGGER.warning("Could not retrieve videos. Message: %s",
-                                this_page['message'])
-                break
-
-            videos.append(this_page)
-        _LOGGER.debug("Getting videos from page %s through %s",
-                      start_page,
-                      end_page)
-        for page in videos:
-            for entry in page:
-                try:
-                    camera_name = entry['camera_name']
-                    clip_addr = entry['address']
-                    thumb_addr = entry['thumbnail']
-                except TypeError:
-                    _LOGGER.warning("Could not extract video information.")
-                    break
-
-                clip_date = entry['created_at']
-
-                try:
-                    self.all_clips[camera_name][clip_date] = clip_addr
-                except KeyError:
-                    self.all_clips[camera_name] = {clip_date: clip_addr}
-
-                if camera_name not in all_dates:
-                    all_dates[camera_name] = list()
-                if clip_date not in all_dates[camera_name]:
-                    all_dates[camera_name].append(clip_date)
-                    try:
-                        self.videos[camera_name].append(
-                            {
-                                'clip': clip_addr,
-                                'thumb': thumb_addr,
-                            }
-                        )
-                    except KeyError:
-                        self.videos[camera_name] = [
-                            {
-                                'clip': clip_addr,
-                                'thumb': thumb_addr,
-                            }
-                        ]
-        self.record_dates = all_dates
-        _LOGGER.debug("Retrieved a total of %s records", len(all_dates))
-        return self.videos
-
 
     def check_new_videos(self):
         """Check if new videos since last refresh."""
@@ -241,6 +179,9 @@ class BlinkSyncModule():
                 timestamp = entry['created_at']
                 self.motion[name] = True
                 self.last_record[name] = {'clip': clip, 'time': timestamp}
+                if name not in self.all_clips:
+                    self.all_clips[name] = {}
+                self.all_clips[name][timestamp] = clip
             except KeyError:
                 _LOGGER.debug("No new videos since last refresh.")
 
