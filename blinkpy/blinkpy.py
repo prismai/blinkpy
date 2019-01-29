@@ -89,6 +89,10 @@ class Blink():
             self.sync[network_name] = sync_module
         self.cameras = self.merge_cameras()
 
+        # part of the hacky way to store all clips
+        for camera in self.cameras:
+            self.cameras[camera].sync.all_clips[camera] = {}
+
     def login(self):
         """Prompt user for username and password."""
         self._username = input("Username:")
