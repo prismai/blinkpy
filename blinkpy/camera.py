@@ -92,10 +92,11 @@ class BlinkCamera():
                                                     self.network_id,
                                                     self.camera_id)
 
-    def update(self, config, force_cache=False):
+    def update(self, config, force_cache=False, **kwargs):
         """Update camera info."""
+        # force = kwargs.pop('force', False)
         self.name = config['name']
-        self.camera_id = str(config['camera_id'])
+        self.camera_id = str(config['id'])
         self.network_id = str(config['network_id'])
         self.serial = config['serial']
         self.motion_enabled = config['enabled']
@@ -111,7 +112,8 @@ class BlinkCamera():
         try:
             self.temperature_calibrated = resp['temp']
         except KeyError:
-            _LOGGER.error("Could not retrieve calibrated temperature.")
+            self.temperature_calibrated = self.temperature
+            _LOGGER.warning("Could not retrieve calibrated temperature.")
 
         # Check if thumbnail exists in config, if not try to
         # get it from the homescreen info in teh sync module
@@ -172,7 +174,8 @@ class BlinkCamera():
                 copyfileobj(response.raw, imgfile)
         else:
             _LOGGER.error("Cannot write image to file, response %s",
-                          response.status_code)
+                          response.status_code,
+                          exc_info=True)
 
     def video_to_file(self, path):
         """Write video to file.
@@ -182,7 +185,9 @@ class BlinkCamera():
         _LOGGER.debug("Writing video from %s to %s", self.name, path)
         response = self._cached_video
         if response is None:
-            _LOGGER.error("No saved video exist for %s.", self.name)
+            _LOGGER.error("No saved video exist for %s.",
+                          self.name,
+                          exc_info=True)
             return
         with open(path, 'wb') as vidfile:
             copyfileobj(response.raw, vidfile)
@@ -198,5 +203,7 @@ class BlinkCamera():
                     return device_thumb
             except KeyError:
                 pass
-        _LOGGER.error("Could not find thumbnail for camera %s", self.name)
+        _LOGGER.error("Could not find thumbnail for camera %s",
+                      self.name,
+                      exc_info=True)
         return None

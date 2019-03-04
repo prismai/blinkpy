@@ -13,23 +13,32 @@ owned by Immedia Inc., see www.blinkforhome.com for more information.
 blinkpy is in no way affiliated with Blink, nor Immedia Inc.
 """
 
+import os.path
 import time
 import getpass
 import logging
+from shutil import copyfileobj
+
 from requests.structures import CaseInsensitiveDict
-import blinkpy.helpers.errors as ERROR
+from dateutil.parser import parse
+
 from blinkpy import api
 from blinkpy.sync_module import BlinkSyncModule
+from blinkpy.helpers import errors as ERROR
 from blinkpy.helpers.util import (
-    create_session, merge_dicts, BlinkURLHandler,
-    BlinkAuthenticationException)
+    create_session, merge_dicts, get_time, BlinkURLHandler,
+    BlinkAuthenticationException, Throttle)
 from blinkpy.helpers.constants import (
-    BLINK_URL, LOGIN_URL, LOGIN_BACKUP_URL)
+    BLINK_URL, LOGIN_URL, OLD_LOGIN_URL, LOGIN_BACKUP_URL)
 from blinkpy.helpers.constants import __version__
 
 REFRESH_RATE = 30
 
-_LOGGER = logging.getLogger('blinkpy')
+# Prevents rapid calls to blink.refresh()
+# with the force_cache flag set to True
+MIN_THROTTLE_TIME = 2
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class Blink():
@@ -61,6 +70,7 @@ class Blink():
         self.session = create_session()
         self.networks = []
         self.cameras = CaseInsensitiveDict({})
+        self.video_list = CaseInsensitiveDict({})
         self._login_url = LOGIN_URL
         self.version = __version__
 
@@ -82,9 +92,16 @@ class Blink():
         elif not self.get_auth_token():
             return
 
+        camera_list = self.get_cameras()
         networks = self.get_ids()
         for network_name, network_id in networks.items():
-            sync_module = BlinkSyncModule(self, network_name, network_id)
+            if network_id not in camera_list.keys():
+                camera_list[network_id] = {}
+                _LOGGER.warning("No cameras found for %s", network_name)
+            sync_module = BlinkSyncModule(self,
+                                          network_name,
+                                          network_id,
+                                          camera_list[network_id])
             sync_module.start()
             self.sync[network_name] = sync_module
         self.cameras = self.merge_cameras()
@@ -98,7 +115,7 @@ class Blink():
         self._username = input("Username:")
         self._password = getpass.getpass("Password:")
         if self.get_auth_token():
-            _LOGGER.info("Login successful!")
+            _LOGGER.debug("Login successful!")
             return True
         _LOGGER.warning("Unable to login with %s.", self._username)
         return False
@@ -110,7 +127,33 @@ class Blink():
         if not isinstance(self._password, str):
             raise BlinkAuthenticationException(ERROR.PASSWORD)
 
-        login_url = LOGIN_URL
+        login_urls = [LOGIN_URL, OLD_LOGIN_URL, LOGIN_BACKUP_URL]
+
+        response = self.login_request(login_urls, is_retry=is_retry)
+
+        if not response:
+            return False
+
+        self._host = "{}.{}".format(self.region_id, BLINK_URL)
+        self._token = response['authtoken']['authtoken']
+        self.networks = response['networks']
+
+        self._auth_header = {'Host': self._host,
+                             'TOKEN_AUTH': self._token}
+        self.urls = BlinkURLHandler(self.region_id)
+
+        return self._auth_header
+
+    def login_request(self, login_urls, is_retry=False):
+        """Make a login request."""
+        try:
+            login_url = login_urls.pop(0)
+        except IndexError:
+            _LOGGER.error("Could not login to blink servers.")
+            return False
+
+        _LOGGER.info("Attempting login with %s", login_url)
+
         response = api.request_login(self,
                                      login_url,
                                      self._username,
@@ -118,34 +161,23 @@ class Blink():
                                      is_retry=is_retry)
         try:
             if response.status_code != 200:
-                _LOGGER.debug("Received response code %s during login.",
-                              response.status_code)
-                login_url = LOGIN_BACKUP_URL
-                response = api.request_login(self,
-                                             login_url,
-                                             self._username,
-                                             self._password,
-                                             is_retry=is_retry)
+                response = self.login_request(login_urls)
             response = response.json()
             (self.region_id, self.region), = response['region'].items()
+
         except AttributeError:
             _LOGGER.error("Login API endpoint failed with response %s",
-                          response)
+                          response,
+                          exc_info=True)
             return False
+
         except KeyError:
             _LOGGER.warning("Could not extract region info.")
             self.region_id = 'piri'
             self.region = 'UNKNOWN'
 
-        self._host = "{}.{}".format(self.region_id, BLINK_URL)
-        self._token = response['authtoken']['authtoken']
-        self.networks = response['networks']
-        self._auth_header = {'Host': self._host,
-                             'TOKEN_AUTH': self._token}
-        self.urls = BlinkURLHandler(self.region_id)
         self._login_url = login_url
-
-        return self._auth_header
+        return response
 
     def get_ids(self):
         """Set the network ID and Account ID."""
@@ -166,6 +198,26 @@ class Blink():
         self.network_ids = all_networks
         return network_dict
 
+    def get_cameras(self):
+        """Retrieve a camera list for each onboarded network."""
+        response = api.request_homescreen(self)
+        try:
+            all_cameras = {}
+            for camera in response['cameras']:
+                camera_network = str(camera['network_id'])
+                camera_name = camera['name']
+                camera_id = camera['id']
+                camera_info = {'name': camera_name, 'id': camera_id}
+                if camera_network not in all_cameras:
+                    all_cameras[camera_network] = []
+
+                all_cameras[camera_network].append(camera_info)
+            return all_cameras
+        except KeyError:
+            _LOGGER.error("Initialization failue. Could not retrieve cameras.")
+            return {}
+
+    @Throttle(seconds=MIN_THROTTLE_TIME)
     def refresh(self, force_cache=False):
         """
         Perform a system refresh.
@@ -179,6 +231,8 @@ class Blink():
             if not force_cache:
                 # Prevents rapid clearing of motion detect property
                 self.last_refresh = int(time.time())
+            return True
+        return False
 
     def check_if_ok_to_update(self):
         """Check if it is ok to perform an http request."""
@@ -196,3 +250,77 @@ class Blink():
         for sync in self.sync:
             combined = merge_dicts(combined, self.sync[sync].cameras)
         return combined
+
+    def download_videos(self, path, since=None, camera='all', stop=10):
+        """
+        Download all videos from server since specified time.
+
+        :param path: Path to write files.  /path/<cameraname>_<recorddate>.mp4
+        :param since: Date and time to get videos from.
+                      Ex: "2018/07/28 12:33:00" to retrieve videos since
+                           July 28th 2018 at 12:33:00
+        :param camera: Camera name to retrieve.  Defaults to "all".
+                       Use a list for multiple cameras.
+        :param stop: Page to stop on (~25 items per page. Default page 10).
+        """
+        if since is None:
+            since_epochs = self.last_refresh
+        else:
+            parsed_datetime = parse(since, fuzzy=True)
+            since_epochs = parsed_datetime.timestamp()
+
+        formatted_date = get_time(time_to_convert=since_epochs)
+        _LOGGER.info("Retrieving videos since %s", formatted_date)
+
+        if not isinstance(camera, list):
+            camera = [camera]
+
+        for page in range(1, stop):
+            response = api.request_videos(self, time=since_epochs, page=page)
+            _LOGGER.debug("Processing page %s", page)
+            try:
+                result = response['videos']
+                if not result:
+                    raise IndexError
+            except (KeyError, IndexError):
+                _LOGGER.info("No videos found on page %s. Exiting.", page)
+                break
+
+            self._parse_downloaded_items(result, camera, path)
+
+    def _parse_downloaded_items(self, result, camera, path):
+        """Parse downloaded videos."""
+        for item in result:
+            try:
+                created_at = item['created_at']
+                camera_name = item['camera_name']
+                is_deleted = item['deleted']
+                address = item['address']
+            except KeyError:
+                _LOGGER.info("Missing clip information, skipping...")
+                continue
+
+            if camera_name not in camera and 'all' not in camera:
+                _LOGGER.debug("Skipping videos for %s.", camera_name)
+                continue
+
+            if is_deleted:
+                _LOGGER.debug("%s: %s is marked as deleted.",
+                              camera_name,
+                              address)
+                continue
+
+            clip_address = "{}{}".format(self.urls.base_url, address)
+            filename = "{}_{}.mp4".format(camera_name, created_at)
+            filename = os.path.join(path, filename)
+
+            if os.path.isfile(filename):
+                _LOGGER.info("%s already exists, skipping...", filename)
+                continue
+
+            response = api.http_get(self, url=clip_address,
+                                    stream=True, json=False)
+            with open(filename, 'wb') as vidfile:
+                copyfileobj(response.raw, vidfile)
+
+            _LOGGER.info("Downloaded video to %s", filename)
